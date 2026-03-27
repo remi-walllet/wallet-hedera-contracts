@@ -2,9 +2,9 @@
   "network": "hedera_testnet",
   "chainId": 296,
   "RemiWallet": {
-    "address": "0xd1556B143B68aB15b87F6728691457168e961d82",
-    "deployedAt": "2026-03-27T14:00:21.071Z",
+    "address": "0xC85AE96c6Ab3de955509429C1e87Ec5383d2f25d",
+    "deployedAt": "2026-03-19T18:04:25.514Z",
     "deployer": "0xE00B2818e5221e80BfAC3Aa5A22b2D7eBBe14A33",
-    "txHash": "0xf0ce2cde8cf5a916d1846d2e548db1ab96c4e99892f6dc7ea1bbd18c413e18f1"
+    "txHash": "0xe4919522ca478b3389bcabc76d4630ba162362cc402faf31feb7646426370681"
   }
 }
