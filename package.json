@@ -1,0 +1,24 @@
+{
+  "name": "wallet-hedera-contracts",
+  "version": "0.1.0",
+  "scripts": {
+    "compile": "hardhat compile",
+    "postcompile": "ts-node scripts/sync-abi.ts",
+    "test": "hardhat test",
+    "deploy:testnet": "hardhat run scripts/deploy.ts --network hedera_testnet",
+    "deploy:local": "hardhat run scripts/deploy.ts --network hardhat",
+    "deploy:wallet:testnet": "hardhat run scripts/deploy-wallet.ts --network hedera_testnet",
+    "deploy:wallet:local": "hardhat run scripts/deploy-wallet.ts --network hardhat"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@types/node": "^20.0.0",
+    "dotenv": "^16.4.0",
+    "hardhat": "^2.22.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.6.1"
+  }
+}
