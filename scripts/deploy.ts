@@ -50,11 +50,6 @@ async function main() {
       deployer: deployer.address,
       txHash: deployTx?.hash ?? null,
     },
-    PaymentRegistry_v1_DEPRECATED: {
-      address: "0x20cCe3150321Ecd1bA943e14dD9C03C36c690519",
-      deployedAt: "2026-03-12",
-      note: "M1 state registry — deprecated in M2a, replaced by RemiWallet",
-    },
   };
 
   fs.writeFileSync(
