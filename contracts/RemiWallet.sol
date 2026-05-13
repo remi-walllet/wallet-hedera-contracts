@@ -38,10 +38,16 @@ contract RemiWallet is Ownable {
     mapping(bytes32 => PaymentRequest) public paymentRequests;
     address public usdcTokenAddress;
 
+    address public feeRecipient;
+    uint256 public feeBasisPoints; // 50 = 0.50 %
+    uint256 public minFeeUsdc;     // 6 decimals. 10000 = 0.01 USDC
+
     event SessionKeyRegistered(address indexed key, uint256 dailyLimit, uint256 expiresAt);
     event SessionKeyRevoked(address indexed key);
     event SessionKeyLimitUpdated(address indexed key, uint256 newLimit);
     event UsdcTransferred(address indexed sessionKey, address indexed to, uint256 amount, string memo);
+    event FeeConfigUpdated(address indexed feeRecipient, uint256 feeBasisPoints, uint256 minFeeUsdc);
+    event FeeCollected(address indexed sessionKey, address indexed feeRecipient, uint256 feeAmount, string memo);
     event PaymentRequestCreated(bytes32 indexed requestId, address indexed recipient, uint256 amountUsdc, uint256 expiresAt);
     event PaymentConfirmed(bytes32 indexed requestId, address indexed recipient, uint256 amountUsdc, string hederaTxId);
     event PaymentFailed(bytes32 indexed requestId, string reason);
@@ -98,6 +104,21 @@ contract RemiWallet is Ownable {
         emit SessionKeyLimitUpdated(key, newLimit);
     }
 
+    // ── Fee Configuration (Owner = Threshold 2-of-3) ──────────────────
+
+    function setFeeConfig(
+        address _feeRecipient,
+        uint256 _feeBasisPoints,
+        uint256 _minFeeUsdc
+    ) external onlyOwner {
+        require(_feeRecipient != address(0), "RemiWallet: invalid fee recipient");
+        require(_feeBasisPoints <= 500, "RemiWallet: fee too high");
+        feeRecipient = _feeRecipient;
+        feeBasisPoints = _feeBasisPoints;
+        minFeeUsdc = _minFeeUsdc;
+        emit FeeConfigUpdated(_feeRecipient, _feeBasisPoints, _minFeeUsdc);
+    }
+
     // ── USDC Transfer (Session Key — Data Plane) ───────────────────────
 
     function transferUsdc(
@@ -118,9 +139,35 @@ contract RemiWallet is Ownable {
             sk.dailySpent + amount <= sk.dailyLimitUsdc,
             "RemiWallet: daily limit exceeded"
         );
-        sk.dailySpent += amount;
+        sk.dailySpent += amount; // gross amount (before fee)
 
-        // HTS precompile: transferToken(address token, address from, address to, int64 amount)
+        uint256 feeAmount = 0;
+        uint256 netAmount = amount;
+
+        if (feeRecipient != address(0) && feeBasisPoints > 0) {
+            feeAmount = (amount * feeBasisPoints) / 10000;
+            if (feeAmount < minFeeUsdc) {
+                feeAmount = minFeeUsdc;
+            }
+            if (feeAmount >= amount) {
+                feeAmount = 0;
+                netAmount = amount;
+            } else {
+                netAmount = amount - feeAmount;
+            }
+        }
+
+        _htsTransfer(to, netAmount);
+
+        if (feeAmount > 0) {
+            _htsTransfer(feeRecipient, feeAmount);
+            emit FeeCollected(msg.sender, feeRecipient, feeAmount, memo);
+        }
+
+        emit UsdcTransferred(msg.sender, to, netAmount, memo);
+    }
+
+    function _htsTransfer(address to, uint256 amount) private {
         (bool success, bytes memory result) = HTS_PRECOMPILE.call(
             abi.encodeWithSignature(
                 "transferToken(address,address,address,int64)",
@@ -131,11 +178,8 @@ contract RemiWallet is Ownable {
             )
         );
         require(success, "RemiWallet: HTS call failed");
-
         int64 responseCode = abi.decode(result, (int64));
         require(responseCode == 22, "RemiWallet: HTS transfer failed");
-
-        emit UsdcTransferred(msg.sender, to, amount, memo);
     }
 
     // ── Payment Requests ─────
@@ -195,6 +239,20 @@ contract RemiWallet is Ownable {
     }
 
     // ── View Functions ─────────────────────────────────────────────────
+
+    function calculateFee(uint256 amount) external view returns (uint256 feeAmount, uint256 netAmount) {
+        if (feeRecipient == address(0) || feeBasisPoints == 0) {
+            return (0, amount);
+        }
+        feeAmount = (amount * feeBasisPoints) / 10000;
+        if (feeAmount < minFeeUsdc) {
+            feeAmount = minFeeUsdc;
+        }
+        if (feeAmount >= amount) {
+            return (0, amount);
+        }
+        netAmount = amount - feeAmount;
+    }
 
     function getRequest(bytes32 requestId) external view returns (PaymentRequest memory) {
         return paymentRequests[requestId];
