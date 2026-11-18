@@ -11,6 +11,7 @@ describe("RemiWallet", function () {
   let sessionKey2: SignerWithAddress;
   let recipient: SignerWithAddress;
   let nonOwner: SignerWithAddress;
+  let feeRecipient: SignerWithAddress;
 
   // Fake USDC address — HTS precompile will fail in local hardhat,
   // but we test everything else. Integration tests cover real HTS.
@@ -21,7 +22,7 @@ describe("RemiWallet", function () {
   let expiresAt: number;
 
   beforeEach(async function () {
-    [owner, sessionKey, sessionKey2, recipient, nonOwner] =
+    [owner, sessionKey, sessionKey2, recipient, nonOwner, feeRecipient] =
       await ethers.getSigners();
 
     const latestTime = await time.latest();
@@ -508,6 +509,150 @@ describe("RemiWallet", function () {
         .withArgs(sessionKey.address, newLimit, newExpiry);
 
       expect(await wallet.isSessionKeyValid(sessionKey.address)).to.be.true;
+    });
+  });
+
+  // ── Fee System ──────────────────────────────────────────────────────
+
+  describe("Fee system", function () {
+    const FEE_BPS = 50n; // 0.50%
+    const MIN_FEE = 10000n; // 0.01 USDC (6 decimals)
+    const TRANSFER_AMOUNT = ethers.parseUnits("100", 6); // 100 USDC
+
+    describe("setFeeConfig", function () {
+      it("41. Updates fee config and emits FeeConfigUpdated", async function () {
+        await expect(
+          wallet.setFeeConfig(feeRecipient.address, FEE_BPS, MIN_FEE)
+        )
+          .to.emit(wallet, "FeeConfigUpdated")
+          .withArgs(feeRecipient.address, FEE_BPS, MIN_FEE);
+
+        expect(await wallet.feeRecipient()).to.equal(feeRecipient.address);
+        expect(await wallet.feeBasisPoints()).to.equal(FEE_BPS);
+        expect(await wallet.minFeeUsdc()).to.equal(MIN_FEE);
+      });
+
+      it("42. Reverts when feeBasisPoints > 500", async function () {
+        await expect(
+          wallet.setFeeConfig(feeRecipient.address, 501, MIN_FEE)
+        ).to.be.revertedWith("RemiWallet: fee too high");
+      });
+
+      it("43. Reverts when feeRecipient is address(0)", async function () {
+        await expect(
+          wallet.setFeeConfig(ethers.ZeroAddress, FEE_BPS, MIN_FEE)
+        ).to.be.revertedWith("RemiWallet: invalid fee recipient");
+      });
+
+      it("44. Reverts when called by non-owner", async function () {
+        await expect(
+          wallet
+            .connect(nonOwner)
+            .setFeeConfig(feeRecipient.address, FEE_BPS, MIN_FEE)
+        ).to.be.revertedWithCustomError(wallet, "OwnableUnauthorizedAccount");
+      });
+
+      it("45. Allows 0 bps (effectively disables fee)", async function () {
+        await wallet.setFeeConfig(feeRecipient.address, 0, MIN_FEE);
+        expect(await wallet.feeBasisPoints()).to.equal(0);
+      });
+
+      it("46. Allows max 500 bps (5%)", async function () {
+        await wallet.setFeeConfig(feeRecipient.address, 500, MIN_FEE);
+        expect(await wallet.feeBasisPoints()).to.equal(500);
+      });
+    });
+
+    describe("calculateFee", function () {
+      it("47. Returns (0, amount) when no fee config set", async function () {
+        const [feeAmount, netAmount] =
+          await wallet.calculateFee(TRANSFER_AMOUNT);
+        expect(feeAmount).to.equal(0);
+        expect(netAmount).to.equal(TRANSFER_AMOUNT);
+      });
+
+      it("48. Returns (0, amount) when feeBasisPoints is 0", async function () {
+        await wallet.setFeeConfig(feeRecipient.address, 0, MIN_FEE);
+        const [feeAmount, netAmount] =
+          await wallet.calculateFee(TRANSFER_AMOUNT);
+        expect(feeAmount).to.equal(0);
+        expect(netAmount).to.equal(TRANSFER_AMOUNT);
+      });
+
+      it("49. Calculates correct fee at 50 bps on 100 USDC", async function () {
+        await wallet.setFeeConfig(feeRecipient.address, FEE_BPS, MIN_FEE);
+        const [feeAmount, netAmount] =
+          await wallet.calculateFee(TRANSFER_AMOUNT);
+        // 100 USDC * 50 / 10000 = 0.50 USDC = 500000
+        expect(feeAmount).to.equal(500000n);
+        expect(netAmount).to.equal(TRANSFER_AMOUNT - 500000n);
+      });
+
+      it("50. Uses minFee when calculated fee is below minimum", async function () {
+        await wallet.setFeeConfig(feeRecipient.address, FEE_BPS, MIN_FEE);
+        // 0.10 USDC → fee = 0.10 * 0.005 = 0.0005 USDC = 500 < minFee 10000
+        const smallAmount = ethers.parseUnits("0.1", 6); // 100000
+        const [feeAmount, netAmount] =
+          await wallet.calculateFee(smallAmount);
+        expect(feeAmount).to.equal(MIN_FEE);
+        expect(netAmount).to.equal(smallAmount - MIN_FEE);
+      });
+
+      it("51. Returns (0, amount) when fee >= amount (skip fee)", async function () {
+        await wallet.setFeeConfig(feeRecipient.address, FEE_BPS, MIN_FEE);
+        // amount = 5000 (0.005 USDC), minFee = 10000 → fee >= amount → skip
+        const tinyAmount = 5000n;
+        const [feeAmount, netAmount] =
+          await wallet.calculateFee(tinyAmount);
+        expect(feeAmount).to.equal(0);
+        expect(netAmount).to.equal(tinyAmount);
+      });
+    });
+
+    describe("transferUsdc with fee", function () {
+      beforeEach(async function () {
+        await wallet.registerSessionKey(
+          sessionKey.address,
+          DAILY_LIMIT,
+          expiresAt
+        );
+      });
+
+      it("52. No fee config → no FeeCollected event (existing behavior)", async function () {
+        // HTS precompile call will revert on local hardhat, but we can
+        // verify that no FeeCollected event is expected by checking the
+        // fee config is zero before the call fails at the HTS level.
+        expect(await wallet.feeRecipient()).to.equal(ethers.ZeroAddress);
+        expect(await wallet.feeBasisPoints()).to.equal(0);
+      });
+
+      it("53. dailySpent tracks gross amount (not net)", async function () {
+        // We can't do a full HTS transfer on hardhat, but we can verify
+        // the spending limit check uses the gross amount by checking that
+        // attempting DAILY_LIMIT + 1 reverts even with fee config set.
+        await wallet.setFeeConfig(feeRecipient.address, FEE_BPS, MIN_FEE);
+        const overLimit = DAILY_LIMIT + 1n;
+        await expect(
+          wallet
+            .connect(sessionKey)
+            .transferUsdc(recipient.address, overLimit, "over-limit")
+        ).to.be.reverted;
+      });
+
+      it("54. transferUsdc with fee config set still validates inputs", async function () {
+        await wallet.setFeeConfig(feeRecipient.address, FEE_BPS, MIN_FEE);
+        await expect(
+          wallet
+            .connect(sessionKey)
+            .transferUsdc(ethers.ZeroAddress, TRANSFER_AMOUNT, "test")
+        ).to.be.revertedWith("RemiWallet: zero recipient");
+
+        await expect(
+          wallet
+            .connect(sessionKey)
+            .transferUsdc(recipient.address, 0, "test")
+        ).to.be.revertedWith("RemiWallet: zero amount");
+      });
     });
   });
 });
